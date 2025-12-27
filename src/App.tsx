@@ -1,131 +1,231 @@
-import { useState, useEffect } from 'react'
-import './App.css'
+import { useState, useEffect, useRef } from "react";
+import "./App.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
+type JobStatus = "pending" | "running" | "done" | "error";
 
 interface JobResponse {
-  id: string
-  repo_url: string
-  status: string
-  result_url: string | null
+  id: string;
+  repo_url: string;
+  status: JobStatus;
+  result_url?: string | null;
+  error_message?: string | null;
 }
 
 function App() {
-  const [repoUrl, setRepoUrl] = useState('')
-  const [jobId, setJobId] = useState<string | null>(null)
-  const [jobStatus, setJobStatus] = useState<JobResponse | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [repoUrl, setRepoUrl] = useState("");
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [job, setJob] = useState<JobResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Submit job
+  const validateGitHubUrl = (url: string): boolean => {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.hostname === "github.com" && urlObj.pathname.length > 1;
+    } catch {
+      return false;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
+    e.preventDefault();
+    setError(null);
+    setJob(null);
+    setJobId(null);
+
+    if (!repoUrl) {
+      setError("Please enter a repository URL");
+      return;
+    }
+
+    if (!validateGitHubUrl(repoUrl)) {
+      setError("Please enter a valid GitHub repository URL");
+      return;
+    }
 
     try {
-      const response = await fetch(`${API_BASE}/jobs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_url: repoUrl }),
-      })
+      setLoading(true);
+      abortControllerRef.current = new AbortController();
 
-      if (!response.ok) {
-        throw new Error('Failed to create job')
+      const res = await fetch(`${API_BASE}/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_url: repoUrl }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Failed to create job");
       }
 
-      const data: JobResponse = await response.json()
-      setJobId(data.id)
-      setJobStatus(data)
+      const data: JobResponse = await res.json();
+      setJobId(data.id);
+      setJob(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred')
+      if (err instanceof Error) {
+        if (err.name !== "AbortError") {
+          setError(err.message || "Unexpected error occurred");
+        }
+      } else {
+        setError("Unexpected error occurred");
+      }
     } finally {
-      setLoading(false)
+      setLoading(false);
+      abortControllerRef.current = null;
     }
-  }
+  };
 
-  // Poll job status
   useEffect(() => {
-    if (!jobId) return
+    if (!jobId) return;
 
-    const pollInterval = setInterval(async () => {
+    const abortController = new AbortController();
+
+    const interval = setInterval(async () => {
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}`)
-        if (!response.ok) {
-          throw new Error('Failed to fetch job status')
+        const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+          signal: abortController.signal,
+        });
+
+        if (!res.ok) {
+          throw new Error("Failed to fetch job status");
         }
 
-        const data: JobResponse = await response.json()
-        setJobStatus(data)
+        const data: JobResponse = await res.json();
+        setJob(data);
 
-        // Stop polling if job is done
-        if (data.status === 'done' || data.status === 'failed') {
-          clearInterval(pollInterval)
+        if (data.status === "done" || data.status === "error") {
+          clearInterval(interval);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Polling error')
-        clearInterval(pollInterval)
+        if (err instanceof Error && err.name !== "AbortError") {
+          console.error("Error fetching job status:", err);
+        }
       }
-    }, 2000) // Poll every 2 seconds
+    }, 3000);
 
-    return () => clearInterval(pollInterval)
-  }, [jobId])
+    return () => {
+      clearInterval(interval);
+      abortController.abort();
+    };
+  }, [jobId]);
+
+  const getStatusIcon = (status: JobStatus) => {
+    switch (status) {
+      case "pending":
+        return "⏳";
+      case "running":
+        return "⚙️";
+      case "done":
+        return "✅";
+      case "error":
+        return "❌";
+      default:
+        return "📄";
+    }
+  };
 
   return (
-    <div className="container">
-      <h1>AutoDoc Agent</h1>
-      <p className="subtitle">Generate documentation for your GitHub repositories</p>
+    <div className="app-container">
+      <header className="header">
+        <h1>Autonomous Codebase Documenter</h1>
+        <p>
+          Transform your GitHub repositories into comprehensive documentation
+          with AI-powered analysis
+        </p>
+      </header>
 
-      <form onSubmit={handleSubmit} className="form">
-        <input
-          type="url"
-          value={repoUrl}
-          onChange={(e) => setRepoUrl(e.target.value)}
-          placeholder="https://github.com/username/repository"
-          required
-          disabled={loading}
-          className="input"
-        />
-        <button type="submit" disabled={loading || !repoUrl} className="button">
-          {loading ? 'Submitting...' : 'Generate Docs'}
-        </button>
-      </form>
+      <div className="form-container">
+        <form onSubmit={handleSubmit}>
+          <div className="input-group">
+            <label htmlFor="repo-url">GitHub Repository URL</label>
+            <input
+              id="repo-url"
+              type="url"
+              placeholder="https://github.com/username/repository"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              disabled={loading}
+              required
+              aria-label="GitHub repository URL"
+            />
+          </div>
+
+          <button
+            type="submit"
+            className="submit-btn"
+            disabled={loading}
+            aria-label={loading ? "Submitting..." : "Generate documentation"}
+          >
+            {loading && <span className="spinner" aria-hidden="true"></span>}
+            {loading ? "Creating Job..." : "Generate Documentation"}
+          </button>
+        </form>
+      </div>
 
       {error && (
-        <div className="error">
+        <div className="error-message" role="alert">
           <strong>Error:</strong> {error}
         </div>
       )}
 
-      {jobStatus && (
-        <div className="job-status">
-          <h2>Job Status</h2>
-          <div className="status-item">
-            <span className="label">Job ID:</span>
-            <span className="value">{jobStatus.id}</span>
-          </div>
-          <div className="status-item">
-            <span className="label">Repository:</span>
-            <span className="value">{jobStatus.repo_url}</span>
-          </div>
-          <div className="status-item">
-            <span className="label">Status:</span>
-            <span className={`status-badge status-${jobStatus.status}`}>
-              {jobStatus.status}
+      {job && (
+        <div className="job-card" role="region" aria-label="Job status">
+          <div className="job-header">
+            <span className="job-id" title={job.id}>
+              Job ID: {job.id.slice(0, 8)}...
+            </span>
+            <span className={`status-badge ${job.status}`}>
+              <span
+                className="status-indicator"
+                aria-hidden="true"
+              ></span>
+              {getStatusIcon(job.status)} {job.status}
             </span>
           </div>
-          {jobStatus.result_url && (
-            <div className="status-item">
-              <span className="label">Result:</span>
-              <a href={jobStatus.result_url} target="_blank" rel="noopener noreferrer" className="link">
-                View Documentation
-              </a>
+
+          <div className="job-info">
+            <div className="info-row">
+              <span className="info-label">Repository</span>
+              <span className="info-value">{job.repo_url}</span>
             </div>
+
+            {job.status === "running" && (
+              <div className="info-row">
+                <span className="info-label">Progress</span>
+                <span className="info-value">
+                  Processing your repository...
+                </span>
+              </div>
+            )}
+
+            {job.error_message && (
+              <div className="info-row">
+                <span className="info-label">Error Details</span>
+                <span className="info-value" style={{ color: "var(--error-color)" }}>
+                  {job.error_message}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {job.result_url && job.status === "done" && (
+            <a
+              href={job.result_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="result-link"
+            >
+              🚀 View Generated Documentation
+            </a>
           )}
         </div>
       )}
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
